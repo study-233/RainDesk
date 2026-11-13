@@ -1,0 +1,9 @@
+node_modules/
+.venv/
+__pycache__/
+.work/
+dist/
+release/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/

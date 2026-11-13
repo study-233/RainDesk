@@ -1,0 +1,9 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+httpx[socks]==0.28.1
+python-socks[asyncio]==2.7.2
+websockets==15.0.1
+pywin32==311
+pillow==11.3.0
+python-pptx==1.0.2
+pyinstaller==6.16.0

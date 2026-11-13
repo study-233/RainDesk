@@ -1,0 +1,9 @@
+{
+  "$schema":"https://schema.tauri.app/config/2",
+  "productName":"RainDesk",
+  "version":"1.1.0",
+  "identifier":"cn.raindesk.desktop",
+  "build":{"beforeDevCommand":"npm run dev","devUrl":"http://localhost:5173","beforeBuildCommand":"npm run build","frontendDist":"../dist"},
+  "app":{"windows":[{"title":"RainDesk · 雨课堂助手","width":1150,"height":780,"minWidth":840,"minHeight":580}],"security":{"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:17846 ws://127.0.0.1:17846"}},
+  "bundle":{"active":true,"useLocalToolsDir":true,"targets":["nsis"],"icon":["icons/icon.ico"],"resources":{"resources/RainDeskAgent/":"agent/"},"windows":{"nsis":{"installMode":"perMachine","installerHooks":"hooks.nsh","languages":["SimpChinese","English"]}}}
+}
