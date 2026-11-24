@@ -121,6 +121,9 @@ class Engine:
     def checkin_mode(self):
         return self.s.get(self.scoped("checkin-mode"), "authorized")
 
+    def submit_delay(self):
+        return self.s.get(self.scoped("submit-delay"), 0)
+
     def reminders(self):
         return {**DEFAULT_REMINDERS, **self.s.get(self.scoped("reminders"), {})}
 
@@ -408,6 +411,21 @@ class Engine:
         end = self.open.get(lid,{}).get(pid,{}).get("deadline")
         return bool(lid in self.connected and self.policy(lid) and end and time.time()+1.5 < end)
 
+    async def wait_to_submit(self, key, submit_after):
+        _, lid, pid = key
+        while self.eligible(key):
+            remaining = submit_after - time.time()
+            if remaining <= 0:
+                return True
+            if submit_after + 1.5 >= self.open[lid][pid]["deadline"]:
+                self.s.state(key,"ready","提交延迟超过剩余答题时间，已保留答案")
+                return False
+            if self.s.job(key)["state"] != "waiting":
+                self.s.state(key,"waiting")
+            await asyncio.sleep(min(1, remaining))
+        self.s.state(key,"ready")
+        return False
+
     async def process(self, key, did):
         _, lid, pid = key
         try:
@@ -445,19 +463,22 @@ class Engine:
                 return
             if row and row["answer"]:
                 answers = json.loads(row["answer"])
+                submit_after = row["submit_after"] or 0
             else:
                 self.s.state(key,"thinking")
                 async with self.ai_slots:
                     answers, reason, ms = await solve(self.s.get("ai",DEFAULT_AI),self.s.get("api_key","",True),q)
-                self.s.db.execute("UPDATE jobs SET state='ready',answer=?,reason=?,ms=?,detail='' WHERE owner=? AND lesson=? AND problem=?",
-                                  (pack(answers),reason,ms,*key))
-            if self.eligible(key):
+                submit_after = time.time() + self.submit_delay()
+                self.s.db.execute("UPDATE jobs SET state='ready',answer=?,reason=?,ms=?,submit_after=?,detail='' WHERE owner=? AND lesson=? AND problem=?",
+                                  (pack(answers),reason,ms,submit_after,*key))
+            if await self.wait_to_submit(key,submit_after):
                 # Re-fetch the student's result before a single, durable submission attempt.
                 fresh = find_slide(await self.deck(lid,did,True),pid)
                 if fresh is None or fresh["problem"].get("result") not in (None, [], {}, ""):
                     self.s.state(key,"answered","题目已变更或已有答案")
                     return
                 if not self.eligible(key):
+                    self.s.state(key,"ready")
                     self.notify_ready(lid,pid,q)
                     return
                 self.s.state(key,"sending")
@@ -473,6 +494,8 @@ class Engine:
                 self.s.state(key,"uncertain","发送中断，请核对课堂回执")
             elif row and row["state"] == "thinking":
                 self.s.state(key,"queued")
+            elif row and row["state"] == "waiting":
+                self.s.state(key,"ready")
             raise
         except Exception as exc:
             row = self.s.job(key)

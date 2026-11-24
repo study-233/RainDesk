@@ -38,6 +38,9 @@ class Store:
         if "event_key" not in {row[1] for row in self.db.execute("PRAGMA table_info(events)")}:
             self.db.execute("ALTER TABLE events ADD COLUMN event_key TEXT")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS once_per_event ON events(event_key)")
+        if "submit_after" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN submit_after REAL")
+        self.db.execute("UPDATE jobs SET state='ready',detail='' WHERE state='waiting'")
         self.db.execute("UPDATE jobs SET state='uncertain',detail='服务恢复，请核对课堂回执' WHERE state='sending'")
         self.db.execute("UPDATE jobs SET state='queued' WHERE state='thinking'")
         tokenfile = root / "control.token"

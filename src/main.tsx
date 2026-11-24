@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState,type ReactNode} from 'react'
 import {createRoot} from 'react-dom/client'
 import {invoke} from '@tauri-apps/api/core'
+import {getVersion} from '@tauri-apps/api/app'
 import {Activity,ArrowDownToLine,ArrowRight,BookOpen,Check,ChevronLeft,ChevronRight,Clock3,CloudRain,FileStack,FileText,History,LayoutDashboard,Monitor,Radio,RefreshCw,Settings2,ShieldCheck,Sun,Moon,Wifi,WifiOff,Zap,Search,UserRound,TriangleAlert} from 'lucide-react'
 import {Button,Confirm} from './components/ui'
 import {api,connectToken,date,labels,types,type AI,type Deck,type Job,type Snapshot,type Room,type ReminderKind} from './api'
@@ -13,6 +14,7 @@ function Pill({children,active=false}:{children:ReactNode;active?:boolean}){retu
 function Panel({title,icon:Icon,action,children}:{title:string;icon:typeof BookOpen;action?:ReactNode;children:ReactNode}){return <section className="panel"><div className="panel-head"><h2><Icon size={17}/>{title}</h2>{action}</div>{children}</section>}
 function useService(){
   const [s,set]=useState<Snapshot|null>(null),[error,err]=useState('')
+  const [status,setStatus]=useState(''),[attempt,retry]=useState(0)
   useEffect(()=>{
     let active=true,ws:WebSocket|undefined,timer:ReturnType<typeof setTimeout>
     async function open(){
@@ -20,18 +22,25 @@ function useService(){
         const token=await connectToken()
         const state=await (await api('/state')).json()
         if(!active)return
-        set(state);err('')
+        set(state);err('');setStatus('Running')
         ws=new WebSocket('ws://127.0.0.1:17846/events')
         ws.onopen=()=>ws?.send(token)
         ws.onmessage=event=>{const value=JSON.parse(event.data);if(!value.heartbeat&&active)set(value)}
-        ws.onclose=()=>{if(active){err('后台连接中断，正在重连');timer=setTimeout(open,2500)}}
+        ws.onclose=()=>{if(active){set(null);err('后台连接中断，正在重连');timer=setTimeout(open,1000)}}
         ws.onerror=()=>ws?.close()
-      }catch(ex){if(active){err(String(ex instanceof Error?ex.message:ex));timer=setTimeout(open,3000)}}
+      }catch(ex){
+        if(!active)return
+        const state=await invoke<string>('service_status').catch(()=>'Unknown')
+        if(!active)return
+        set(null);setStatus(state)
+        err(state==='Stopped'?'':String(ex instanceof Error?ex.message:ex))
+        timer=setTimeout(open,state==='Stopped'?10000:3000)
+      }
     }
     open()
     return ()=>{active=false;clearTimeout(timer);ws?.close()}
-  },[])
-  return {s,error}
+  },[attempt])
+  return {s,error,status,reconnect:()=>retry(value=>value+1)}
 }
 
 function JobCard({job,act,live}:{job:Job;act:Act;live:boolean}) {
@@ -41,6 +50,7 @@ function JobCard({job,act,live}:{job:Job;act:Act;live:boolean}) {
     {j.question.options.length>0&&<div className="options">{j.question.options.map(o=><div key={o.key} className={j.answer.includes(o.key)?'chosen':''}><b>{o.key}</b>{o.text||'见题图'}</div>)}</div>}
     {j.answer.length>0&&<div className="answer"><b>AI 答案　{j.answer.join('、')}</b><p>{j.reason}</p></div>}
     <footer><small>{j.question.room} · 第 {j.question.page} 页{j.ms!=null?' · '+(j.ms/1000).toFixed(2)+' s':''}</small>{live&&['error','uncertain','accepted','ready','queued'].includes(j.state)&&<Button variant="ghost" onClick={()=>act(()=>api('/jobs/'+j.lesson+'/'+j.problem+'/retry','POST'),'已请求处理')}>{['accepted','uncertain'].includes(j.state)?'核对回执':'重新处理'}</Button>}</footer>
+    {j.state==='waiting'&&j.submit_after&&<small className="detail">预计提交时间 {new Date(j.submit_after*1000).toLocaleTimeString('zh-CN',{hour12:false})}</small>}
     {(j.deadline||j.detail)&&<small className="detail">{j.deadline?'截止 '+date(j.deadline)+'　':''}{j.detail}</small>}
   </article>
 }
@@ -109,7 +119,14 @@ function AutomationSettings({s,act}:{s:Snapshot;act:Act}){
     }finally{busy(false)}
   }
   const {mode,courses:grants,reminders}=s.automation
+  const [delay,setDelay]=useState(String(s.automation.submitDelay??0))
+  useEffect(()=>setDelay(String(s.automation.submitDelay??0)),[s.automation.submitDelay])
   return <Panel title="课堂自动化与提醒" icon={ShieldCheck}><div className="form">
+    <form className="automation-list" onSubmit={ev=>{ev.preventDefault();act(()=>api('/automation/submit-delay','PUT',{seconds:Number(delay)}),'提交延迟已保存')}}>
+      <label>自动提交延迟（秒）<input required type="number" min="0" max="3600" step="1" value={delay} onChange={ev=>setDelay(ev.target.value)}/></label>
+      <small>从 AI 生成答案时开始计时，0 秒表示立即提交。时间不足时保留答案供核对。</small>
+      <div><Button variant="outline" type="submit">保存提交延迟</Button></div>
+    </form>
     <label>普通签到范围<select value={mode} onChange={ev=>act(()=>api('/automation/checkin','PUT',{mode:ev.target.value}),'签到范围已保存')}>
       <option value="authorized">仅已授权测试课程自动签到</option><option value="manual">手动签到</option><option value="all">所有已加入课程自动签到</option>
     </select></label>
@@ -129,13 +146,40 @@ function Settings({s,act}:{s:Snapshot;act:Act}){
     {s.account&&s.automation&&<AutomationSettings key={s.account.domain+'/'+s.account.name} s={s} act={act}/>}
     <Panel title="AI 模型" icon={Zap}><form className="form" onSubmit={ev=>{ev.preventDefault();act(async()=>{await api('/ai','PUT',{...cfg,...(key?{key}:{})});k('')},'模型设置已保存')}}><div className="pair"><label>提供商<select value={cfg.provider} onChange={e=>{const provider=e.target.value;const [url,model]=presets[provider];c({provider,url,model,vision:false});k('')}}>{Object.keys(presets).map(p=><option key={p}>{p}</option>)}</select></label><label>模型名称<input required value={cfg.model} placeholder="填写服务端的模型 ID" onChange={e=>c({...cfg,model:e.target.value})}/></label></div><label>接口地址<input type="url" required value={cfg.url} onChange={e=>c({...cfg,url:e.target.value})}/></label><label>API Key<input type="password" autoComplete="off" value={key} placeholder={s.hasKey&&s.ai.url===cfg.url?'已安全保存，留空保留':'本地模型可留空'} onChange={e=>k(e.target.value)}/></label><label className="check"><input type="checkbox" checked={cfg.vision} onChange={e=>c({...cfg,vision:e.target.checked})}/>向支持视觉的模型发送题图及幻灯片</label><small>作答时会向所选服务发送题干、选项和相邻课件文本。</small><div><Button type="submit"><Check size={15}/>保存模型设置</Button></div></form></Panel></>
 }
+function DesktopSettings({status,reconnect,act}:{status:string;reconnect:()=>void;act:Act}){
+  const [version,setVersion]=useState(''),[checking,setChecking]=useState(false)
+  const [result,setResult]=useState(''),[available,setAvailable]=useState(false),[changing,setChanging]=useState(false)
+  useEffect(()=>{getVersion().then(setVersion).catch(()=>{})},[])
+  async function check(){
+    setChecking(true);setAvailable(false);setResult('')
+    try{
+      const latest=await invoke<string|null>('check_update')
+      setResult(latest?'发现新版本 '+latest:'当前已是最新版本')
+      setAvailable(Boolean(latest))
+    }catch(e){setResult(String(e))}finally{setChecking(false)}
+  }
+  async function change(start:boolean){
+    setChanging(true)
+    try{await invoke('change_service',{start})}
+    finally{reconnect();setChanging(false)}
+  }
+  return <Panel title="应用与后台服务" icon={Settings2}><div className="form">
+    <div className="permission-row"><b>RainDesk {version}</b><Button variant="outline" disabled={checking} onClick={check}>{checking?'正在检查…':'检查更新'}</Button></div>
+    {result&&<div className="permission-row" role="status"><span>{result}</span>{available&&<Button onClick={()=>act(()=>invoke('open_release_page'))}>前往下载新版</Button>}</div>}
+    <div className="permission-row"><b>Windows 后台服务</b>{changing?<small role="status">正在更改服务状态…</small>:status==='Running'
+      ?<Confirm label="关闭后台服务" title="关闭后台服务？" action={()=>act(()=>change(false),'后台服务已关闭')}>课堂监听和待提交任务将停止。可以在此重新启动服务。</Confirm>
+      :status==='Stopped'?<Button variant="outline" onClick={()=>act(()=>change(true),'后台服务已启动')}>启动后台服务</Button>
+      :<Button variant="outline" onClick={reconnect}>刷新服务状态</Button>}</div>
+    <small>关闭窗口后服务会继续运行。手动关闭服务后，可在此重新启动，或在下次 Windows 启动时自动恢复。</small>
+  </div></Panel>
+}
 function App(){
-  const {s,error}=useService(),[tab,go]=useState(0),[notice,n]=useState(''),[dark,t]=useState(()=>localStorage.getItem('theme')==='dark'||(!localStorage.getItem('theme')&&matchMedia('(prefers-color-scheme:dark)').matches))
+  const {s,error,status,reconnect}=useService(),[tab,go]=useState(0),[notice,n]=useState(''),[dark,t]=useState(()=>localStorage.getItem('theme')==='dark'||(!localStorage.getItem('theme')&&matchMedia('(prefers-color-scheme:dark)').matches))
   const mainRef = useRef<HTMLElement>(null)
   useEffect(() => { mainRef.current?.scrollTo(0, 0) }, [tab])
   useEffect(()=>{document.documentElement.classList.toggle('dark',dark);localStorage.setItem('theme',dark?'dark':'light')},[dark])
   useEffect(()=>{if(!notice)return;const tm=setTimeout(()=>n(''),5200);return()=>clearTimeout(tm)},[notice])
   const act:Act=async(fn,ok)=>{try{await fn();if(ok)n(ok)}catch(e){n(e instanceof Error?e.message:String(e))}}
-  return <div className="shell"><aside><div className="brand"><span><CloudRain size={25}/></span><div>RainDesk<small>雨课堂助手</small></div></div><nav>{nav.map(({name,icon:I},i)=><button className={tab===i?'selected':''} key={name} onClick={()=>go(i)}><I size={18}/>{name}</button>)}</nav><div className="side-bottom"><div className="agent"><i className={!error&&s?'good':''}/><span>{error?'服务连接中断':s?'后台服务在线':'连接后台…'}</span></div><button className="profile" onClick={()=>go(4)}><span><UserRound size={17}/></span>{s?.account?.name||'未登录账号'}<ChevronRight size={14}/></button></div></aside><main ref={mainRef} tabIndex={0} aria-label={nav[tab].name}><div className="topbar"><span>工作台 <ChevronRight size={13}/> {nav[tab].name}</span><button aria-label="切换明暗主题" title="切换明暗主题" onClick={()=>t(!dark)}>{dark?<Sun size={17}/>:<Moon size={17}/>}</button></div><div className="content"><header className="heading"><h1>{nav[tab].name}</h1><span><Clock3 size={14}/>{new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</span></header>{error&&<div role="alert" className="warning"><WifiOff size={17}/>{error}</div>}{!s?<Empty icon={Wifi} title="正在连接 Windows 后台服务">请确认 RainDeskAgent 服务已启动。</Empty>:tab===0?<Overview s={s} go={go} act={act}/>:tab===1?<Rooms s={s} act={act}/>:tab===2?<Records s={s} act={act}/>:tab===3?<Materials s={s} act={act}/>:<Settings s={s} act={act}/>}</div></main>{notice&&<div className="toast" role="status"><Activity size={16}/>{notice}<button aria-label="关闭提示" onClick={()=>n('')}>×</button></div>}</div>
+  return <div className="shell"><aside><div className="brand"><span><CloudRain size={25}/></span><div>RainDesk<small>雨课堂助手</small></div></div><nav>{nav.map(({name,icon:I},i)=><button className={tab===i?'selected':''} key={name} onClick={()=>go(i)}><I size={18}/>{name}</button>)}</nav><div className="side-bottom"><div className="agent"><i className={!error&&s?'good':''}/><span>{status==='Stopped'?'后台服务已关闭':error?'服务连接中断':s?'后台服务在线':'连接后台…'}</span></div><button className="profile" onClick={()=>go(4)}><span><UserRound size={17}/></span>{s?.account?.name||'未登录账号'}<ChevronRight size={14}/></button></div></aside><main ref={mainRef} tabIndex={0} aria-label={nav[tab].name}><div className="topbar"><span>工作台 <ChevronRight size={13}/> {nav[tab].name}</span><button aria-label="切换明暗主题" title="切换明暗主题" onClick={()=>t(!dark)}>{dark?<Sun size={17}/>:<Moon size={17}/>}</button></div><div className="content"><header className="heading"><h1>{nav[tab].name}</h1><span><Clock3 size={14}/>{new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</span></header>{error&&<div role="alert" className="warning"><WifiOff size={17}/>{error}</div>}{tab===4&&<DesktopSettings status={status} reconnect={reconnect} act={act}/>}{!s?(tab===4?null:<Empty icon={Wifi} title={status==='Stopped'?'后台服务已关闭':'正在连接 Windows 后台服务'}><Button variant="outline" onClick={()=>go(4)}>管理后台服务</Button></Empty>):tab===0?<Overview s={s} go={go} act={act}/>:tab===1?<Rooms s={s} act={act}/>:tab===2?<Records s={s} act={act}/>:tab===3?<Materials s={s} act={act}/>:<Settings s={s} act={act}/>}</div></main>{notice&&<div className="toast" role="status"><Activity size={16}/>{notice}<button aria-label="关闭提示" onClick={()=>n('')}>×</button></div>}</div>
 }
 createRoot(document.getElementById('root')!).render(<App/>)

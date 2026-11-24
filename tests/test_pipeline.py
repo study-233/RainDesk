@@ -137,6 +137,70 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.sent,[])
 
+    async def wait_for_delay(self, pid):
+        async with asyncio.timeout(5):
+            while True:
+                row = self.store.job((self.e.owner,"1",pid))
+                if row and row["state"] == "waiting":
+                    return row["submit_after"]
+                await asyncio.sleep(.01)
+
+    async def test_delay_survives_retry_and_duplicate_unlock(self):
+        self.store.put(self.e.scoped("1/auto"),True)
+        self.store.put(self.e.scoped("submit-delay"),1)
+        event = self.unlock("101")
+        await self.e.event("1",event)
+        due = await self.wait_for_delay("101")
+        self.assertGreater(due,time.time())
+        self.assertFalse(self.sent)
+        task = self.e.workers[(self.e.owner,"1","101")]
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+        self.assertEqual(self.state("101"),"ready")
+        self.store.put(self.e.scoped("submit-delay"),60)
+        sent_at = []
+        request = self.e.rain.request
+        async def record(*args,**kwargs):
+            if args[2] == "problem/answer":
+                sent_at.append(time.time())
+            return await request(*args,**kwargs)
+        with patch.object(self.e.rain,"request",record):
+            await self.e.event("1",event)
+            await self.e.event("1",event)
+            await self.drain()
+        self.assertEqual(self.sent,["101"])
+        self.assertGreaterEqual(sent_at[0],due)
+        self.assertEqual(self.state("101"),"verified")
+
+    async def test_delayed_submission_respects_pause_and_deadline(self):
+        self.store.put(self.e.scoped("1/auto"),True)
+        self.store.put(self.e.scoped("submit-delay"),10)
+        await self.e.event("1",self.unlock("101",5))
+        await self.drain()
+        self.assertIn("剩余答题时间",self.store.job((self.e.owner,"1","101"))["detail"])
+        await self.e.event("1",self.unlock("102"))
+        await self.wait_for_delay("102")
+        self.store.put(self.e.scoped("1/auto"),False)
+        await self.drain()
+        self.assertEqual(self.state("102"),"ready")
+        self.assertFalse(self.sent)
+
+    async def test_delay_setting_api(self):
+        from api import make_app
+        self.store.put("account",self.e.account | {"name":"test"},True)
+        app = make_app(self.store)
+        with patch.object(Engine,"require_account"):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://local",
+                                         headers={"Authorization":"Bearer "+self.store.token}) as http:
+                self.assertEqual((await http.get("/state")).json()["automation"]["submitDelay"],0)
+                for invalid in (-1,0.5,True,3601):
+                    self.assertEqual((await http.put("/automation/submit-delay",json={"seconds":invalid})).status_code,422)
+                (await http.put("/automation/submit-delay",json={"seconds":20})).raise_for_status()
+                self.assertEqual((await http.get("/state")).json()["automation"]["submitDelay"],20)
+        self.assertEqual(self.e.submit_delay(),20)
+        self.e.account = {**self.e.account,"uid":"other"}
+        self.assertEqual(self.e.submit_delay(),0)
+
     async def test_lost_ack_recovery_reads_without_resend(self):
         self.store.put(self.e.scoped("1/auto"),True)
         self.drop_ack=True

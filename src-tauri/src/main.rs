@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{fs, path::PathBuf};
+mod desktop;
 
 #[tauri::command]
 fn control_token() -> Result<String, String> {
@@ -36,7 +37,8 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![control_token, save_export])
+        .invoke_handler(tauri::generate_handler![control_token, save_export, desktop::change_service,
+            desktop::check_update, desktop::open_release_page, desktop::service_status])
         .run(tauri::generate_context!())
         .expect("RainDesk window initialization failed");
 }

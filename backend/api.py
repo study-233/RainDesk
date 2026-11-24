@@ -34,6 +34,10 @@ class ReminderSetting(BaseModel):
     enabled: bool
 
 
+class SubmissionDelay(BaseModel):
+    seconds: int = Field(strict=True, ge=0, le=3600)
+
+
 class AIConfig(BaseModel):
     provider: str = Field(max_length=100)
     model: str = Field(min_length=1,max_length=200)
@@ -109,7 +113,8 @@ def make_app(store):
                                   ai=store.get("ai",DEFAULT_AI),hasKey=bool(store.get("api_key","",True)))
             cached_revision = revision
         return dict(**cached_records,started=e.started,health=e.health,account=account,rooms=rooms,
-                    automation={"mode":e.checkin_mode(),"courses":grants,"reminders":e.reminders()},
+                    automation={"mode":e.checkin_mode(),"courses":grants,"reminders":e.reminders(),
+                                "submitDelay":e.submit_delay()},
                     qr=e.qr,loginError=e.login_error,
                     loggingIn=bool(e.login_task and not e.login_task.done()))
 
@@ -214,6 +219,12 @@ def make_app(store):
     async def reminders(category:Literal["classroom","question","result","problem"],body:ReminderSetting):
         e.require_account()
         store.put(e.scoped("reminders"),{**e.reminders(),category:body.enabled})
+        return {"ok":True}
+
+    @app.put("/automation/submit-delay")
+    async def submit_delay(body:SubmissionDelay):
+        e.require_account()
+        store.put(e.scoped("submit-delay"),body.seconds)
         return {"ok":True}
 
     @app.post("/jobs/{lid}/{pid}/retry")
